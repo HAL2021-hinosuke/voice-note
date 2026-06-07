@@ -1,5 +1,5 @@
 // 声から綴る — Service Worker
-const CACHE = "koe-tsuzuru-v1";
+const CACHE = "koe-tsuzuru-v2";
 const ASSETS = [
   "./index.html",
   "./manifest.json",

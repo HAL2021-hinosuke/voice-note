@@ -594,7 +594,7 @@ $$(".nav button").forEach(b=> b.addEventListener("click",()=>{
 }));
 
 /* ============ 録音 ============ */
-let mediaRec=null, chunks=[], stream=null, audioCtx=null, analyser=null, rafId=null;
+let mediaRec=null, chunks=[], stream=null, audioCtx=null, analyser=null, rafId=null, recMime="";
 let recStart=0, timerId=null, recState="idle", pausedAt=0;
 const waveEl=$("#wave");
 for(let i=0;i<32;i++){ waveEl.appendChild(document.createElement("span")); }
@@ -608,7 +608,15 @@ async function startRec(){
     stream = await navigator.mediaDevices.getUserMedia({audio:true});
   }catch(e){ toast("マイクへのアクセスが必要です"); return; }
   chunks=[];
-  mediaRec = new MediaRecorder(stream);
+  // ブラウザが対応する形式を優先順に選ぶ（iOS Safari は mp4 / それ以外は webm）
+  let opts={};
+  const cands=["audio/mp4","audio/webm;codecs=opus","audio/webm","audio/aac"];
+  if(window.MediaRecorder && MediaRecorder.isTypeSupported){
+    for(const c of cands){ if(MediaRecorder.isTypeSupported(c)){ opts={mimeType:c}; break; } }
+  }
+  try{ mediaRec = new MediaRecorder(stream, opts); }
+  catch(e){ mediaRec = new MediaRecorder(stream); }
+  recMime = mediaRec.mimeType || opts.mimeType || "";
   mediaRec.ondataavailable=e=>{ if(e.data.size>0) chunks.push(e.data); };
   mediaRec.onstop=onRecStop;
   mediaRec.start();
@@ -660,8 +668,10 @@ function onRecStop(){
   if(stream) stream.getTracks().forEach(t=>t.stop());
   clearInterval(timerId); stopAnalyser();
   if(cancelled){ return; }
-  const blob=new Blob(chunks,{type: mediaRec.mimeType||"audio/webm"});
+  const type = recMime || (mediaRec && mediaRec.mimeType) || "audio/webm";
+  const blob=new Blob(chunks,{type});
   resetRec();
+  if(blob.size < 1200){ toast("録音が短すぎるか、音声が記録されていません"); return; }
   transcribe(blob);
 }
 
@@ -670,16 +680,32 @@ $("#importZone").addEventListener("click",()=> $("#fileInput").click());
 $("#fileInput").addEventListener("change",e=>{ const f=e.target.files[0]; if(f){ transcribe(f); } e.target.value=""; });
 
 /* ============ 文字起こし ============ */
-function showProc(title,desc){ $("#recIdle").classList.add("hidden"); $("#recProcessing").classList.remove("hidden");
+function showProc(title,desc){ restoreProc(); $("#recIdle").classList.add("hidden"); $("#recProcessing").classList.remove("hidden");
   $("#procTitle").textContent=title; $("#procDesc").textContent=desc; }
 function hideProc(){ $("#recProcessing").classList.add("hidden"); $("#recIdle").classList.remove("hidden"); }
+function showError(title, detail){
+  $("#recIdle").classList.add("hidden"); $("#recProcessing").classList.remove("hidden");
+  $("#recProcessing").innerHTML =
+    '<div class="proc">'+
+    '<div style="width:54px;height:54px;margin:0 auto 18px;border-radius:50%;background:var(--red-soft);display:flex;align-items:center;justify-content:center">'+
+    '<svg viewBox="0 0 24 24" fill="none" stroke="#c4654f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:26px;height:26px"><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/><circle cx="12" cy="12" r="10"/></svg></div>'+
+    '<div class="t">'+title+'</div>'+
+    '<div class="d" style="word-break:break-word;max-width:340px;margin:6px auto 0">'+escapeHtml(detail||"")+'</div>'+
+    '<button class="btn btn-ghost" id="errBack" style="margin-top:20px;max-width:220px;margin-left:auto;margin-right:auto">録音画面に戻る</button>'+
+    '</div>';
+  $("#errBack").addEventListener("click",()=>{ restoreProc(); hideProc(); });
+}
+function restoreProc(){
+  $("#recProcessing").innerHTML='<div class="proc"><div class="ring"></div><div class="t" id="procTitle">文字起こし中…</div><div class="d" id="procDesc">音声を解析しています</div></div>';
+}
 
 async function transcribe(blob){
   showProc("文字起こし中…","音声を解析しています");
   let rawText="";
   if(settings.apiKey){
     try{ rawText = await whisperAPI(blob); }
-    catch(e){ hideProc(); toast("文字起こし失敗："+e.message); return; }
+    catch(e){ showError("文字起こしに失敗しました", e.message); return; }
+    if(!rawText || !rawText.trim()){ showError("音声を認識できませんでした", "もう少し長く、はっきり話してみてください"); return; }
   }else{
     await sleep(1400);
     rawText = DEMO_TRANSCRIPT;
@@ -706,13 +732,31 @@ function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
 async function whisperAPI(blob){
   const fd=new FormData();
-  const ext = blob.type.includes("mp4")||blob.type.includes("m4a")?"m4a":(blob.type.includes("wav")?"wav":"webm");
+  const type=(blob.type||"").toLowerCase();
+  let ext="webm";
+  if(type.includes("mp4")||type.includes("m4a")||type.includes("aac")||type.includes("x-m4a")) ext="m4a";
+  else if(type.includes("wav")) ext="wav";
+  else if(type.includes("mpeg")||type.includes("mp3")) ext="mp3";
+  else if(type.includes("ogg")) ext="ogg";
+  else if(type.includes("webm")) ext="webm";
+  // MIMEが空（ファイル読込時など）はファイル名から推測
+  if(!type && blob.name){ const m=blob.name.split(".").pop().toLowerCase(); if(m) ext=m; }
   fd.append("file", blob, "audio."+ext);
   fd.append("model","whisper-1");
   fd.append("language","ja");
-  const r=await fetch("https://api.openai.com/v1/audio/transcriptions",{
-    method:"POST", headers:{Authorization:"Bearer "+settings.apiKey}, body:fd });
-  if(!r.ok){ const t=await r.text(); throw new Error(r.status===401?"APIキーが無効です":("HTTP "+r.status)); }
+  let r;
+  try{
+    r=await fetch("https://api.openai.com/v1/audio/transcriptions",{
+      method:"POST", headers:{Authorization:"Bearer "+settings.apiKey}, body:fd });
+  }catch(netErr){ throw new Error("通信エラー（ネット接続を確認）"); }
+  if(!r.ok){
+    let detail="";
+    try{ const j=await r.json(); detail=j.error&&j.error.message?j.error.message:JSON.stringify(j); }
+    catch(_){ try{ detail=await r.text(); }catch(__){} }
+    if(r.status===401) throw new Error("APIキーが無効です");
+    if(r.status===429) throw new Error("利用上限/残高不足の可能性（429）");
+    throw new Error("HTTP "+r.status+(detail?"："+detail.slice(0,140):""));
+  }
   const j=await r.json(); return j.text||"";
 }
 async function chatAPI(sys,user,jsonMode){
