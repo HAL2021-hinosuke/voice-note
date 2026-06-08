@@ -282,7 +282,7 @@ body{
       </div>
       <div>
         <h1>声から綴る</h1>
-        <div class="sub">VOICE → NOTE</div>
+        <div class="sub">VOICE → NOTE　v3</div>
       </div>
     </div>
     <button class="icon-btn" id="settingsBtn" aria-label="設定">
@@ -1001,10 +1001,21 @@ const DEMO_X=[
   // 編集タブ初期は空
 })();
 
-/* ============ PWA: service worker 登録 ============ */
+/* ============ PWA: service worker 登録（即時更新） ============ */
 if("serviceWorker" in navigator){
   window.addEventListener("load",()=>{
-    navigator.serviceWorker.register("sw.js").catch(()=>{});
+    navigator.serviceWorker.register("sw.js").then(reg=>{
+      reg.update();
+      reg.addEventListener("updatefound",()=>{
+        const nw=reg.installing;
+        if(nw) nw.addEventListener("statechange",()=>{
+          if(nw.state==="installed" && navigator.serviceWorker.controller){
+            // 新バージョンが入ったら一度だけ自動リロード
+            if(!sessionStorage.getItem("reloaded_once")){ sessionStorage.setItem("reloaded_once","1"); location.reload(); }
+          }
+        });
+      });
+    }).catch(()=>{});
   });
 }
 </script>

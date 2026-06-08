@@ -1,7 +1,6 @@
-// 声から綴る — Service Worker
-const CACHE = "koe-tsuzuru-v2";
+// 声から綴る — Service Worker (v3: HTMLは常に最新を取得)
+const CACHE = "koe-tsuzuru-v3";
 const ASSETS = [
-  "./index.html",
   "./manifest.json",
   "./icon-180.png",
   "./icon-192.png",
@@ -9,7 +8,8 @@ const ASSETS = [
 ];
 
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  self.skipWaiting();
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).catch(()=>{}));
 });
 
 self.addEventListener("activate", e => {
@@ -22,18 +22,31 @@ self.addEventListener("activate", e => {
 
 self.addEventListener("fetch", e => {
   const url = new URL(e.request.url);
-  // OpenAI など外部APIは絶対にキャッシュせずネットワーク直通
-  if (url.hostname.includes("openai.com") || e.request.method !== "GET") {
-    return; // ブラウザ標準の動作にまかせる
+
+  // 外部API(OpenAI等)とGET以外は一切介入しない（ネットワーク直通）
+  if (url.origin !== location.origin || e.request.method !== "GET") {
+    return;
   }
-  // 自分のアセットはキャッシュ優先、なければネットワーク
+
+  // HTMLナビゲーションは常にネットワーク優先（最新を取得、失敗時のみキャッシュ）
+  const isHTML = e.request.mode === "navigate" ||
+                 (e.request.headers.get("accept")||"").includes("text/html");
+  if (isHTML) {
+    e.respondWith(
+      fetch(e.request).then(res => {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy));
+        return res;
+      }).catch(() => caches.match(e.request).then(h => h || caches.match("./index.html")))
+    );
+    return;
+  }
+
+  // それ以外のアセットはキャッシュ優先
   e.respondWith(
     caches.match(e.request).then(hit =>
       hit || fetch(e.request).then(res => {
-        if (res.ok && url.origin === location.origin) {
-          const copy = res.clone();
-          caches.open(CACHE).then(c => c.put(e.request, copy));
-        }
+        if (res.ok) { const c = res.clone(); caches.open(CACHE).then(x => x.put(e.request, c)); }
         return res;
       }).catch(() => hit)
     )
