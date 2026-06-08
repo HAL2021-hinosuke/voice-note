@@ -748,7 +748,7 @@ async function whisperAPI(blob){
   try{
     r=await fetch("https://api.openai.com/v1/audio/transcriptions",{
       method:"POST", headers:{Authorization:"Bearer "+settings.apiKey}, body:fd });
-  }catch(netErr){ throw new Error("通信エラー（ネット接続を確認）"); }
+  }catch(netErr){ throw new Error("通信失敗: "+(netErr&&netErr.message?netErr.message:String(netErr))); }
   if(!r.ok){
     let detail="";
     try{ const j=await r.json(); detail=j.error&&j.error.message?j.error.message:JSON.stringify(j); }
