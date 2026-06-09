@@ -282,7 +282,7 @@ body{
       </div>
       <div>
         <h1>声から綴る</h1>
-        <div class="sub">VOICE → NOTE　v5</div>
+        <div class="sub">VOICE → NOTE　v7</div>
       </div>
     </div>
     <button class="icon-btn" id="settingsBtn" aria-label="設定">
@@ -391,6 +391,11 @@ body{
           保存
         </button>
       </div>
+      <div style="height:10px"></div>
+      <button class="btn btn-ghost" id="dlAudioBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        録音データを保存（確認用）
+      </button>
     </section>
 
     <!-- ========== X RESULTS VIEW ========== -->
@@ -534,9 +539,10 @@ const DEFAULT_PERSONA =
 const DEFAULT_PROMPTS = {
   transcribe:
 `音声から自動文字起こしされた生テキストを、note下書きにできる読みやすい状態に整形してください。
+【最重要】要約・短縮・内容の取捨選択は絶対にしないこと。話された情報は全て残す。出力が入力より大幅に短くなってはいけない。
 ・話し言葉の自然なリズムや本人らしい言い回しは残す。
-・誤認識・フィラー（えーと/あの等）・重複は除去。意味のまとまりで段落分け。
-・内容の追加や創作はしない。整形済み本文のみ出力。`,
+・誤認識の明らかな誤字、フィラー（えーと/あの等）の除去、重複の整理、意味のまとまりでの段落分けのみ行う。
+・冒頭にタイトルや要約を付けない。整形した本文だけを、元の分量を保ったまま出力する。`,
   refine:
 `整形済み下書きを、公開できる完成度のnote記事に仕上げてください。修正レベルは「大胆な再構成」。
 ・読者視点で最後まで読みたくなる構成に。冒頭3行で心をつかむ導入。小見出し2〜4個。
@@ -601,6 +607,12 @@ $$(".nav button").forEach(b=> b.addEventListener("click",()=>{
 /* ============ 録音 ============ */
 let mediaRec=null, chunks=[], stream=null, audioCtx=null, analyser=null, rafId=null, recMime="";
 let recStart=0, timerId=null, recState="idle", pausedAt=0;
+let lastBlob=null, bgWarned=false, pendingBlob=null;
+
+// 録音中にアプリが背面に回ったら警告（iOSはバックグラウンドで録音が止まるため）
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden && recState==="recording"){ bgWarned=true; }
+});
 const waveEl=$("#wave");
 for(let i=0;i<32;i++){ waveEl.appendChild(document.createElement("span")); }
 const waveBars=[...waveEl.children];
@@ -612,7 +624,7 @@ async function startRec(){
   try{
     stream = await navigator.mediaDevices.getUserMedia({audio:true});
   }catch(e){ toast("マイクへのアクセスが必要です"); return; }
-  chunks=[];
+  chunks=[]; bgWarned=false; lastBlob=null;
   // ブラウザが対応する形式を優先順に選ぶ（iOS Safari は mp4 / それ以外は webm）
   let opts={};
   const cands=["audio/mp4","audio/webm;codecs=opus","audio/webm","audio/aac"];
@@ -622,9 +634,9 @@ async function startRec(){
   try{ mediaRec = new MediaRecorder(stream, opts); }
   catch(e){ mediaRec = new MediaRecorder(stream); }
   recMime = mediaRec.mimeType || opts.mimeType || "";
-  mediaRec.ondataavailable=e=>{ if(e.data.size>0) chunks.push(e.data); };
+  mediaRec.ondataavailable=e=>{ if(e.data && e.data.size>0) chunks.push(e.data); };
   mediaRec.onstop=onRecStop;
-  mediaRec.start();
+  mediaRec.start(1000); // 1秒ごとにデータを書き出し、長時間でも欠落しないようにする
   recState="recording"; recStart=Date.now();
   $("#recMain").classList.add("recording");
   $("#recStatus").textContent="録音中…  タップで一時停止";
@@ -675,8 +687,14 @@ function onRecStop(){
   if(cancelled){ return; }
   const type = recMime || (mediaRec && mediaRec.mimeType) || "audio/webm";
   const blob=new Blob(chunks,{type});
+  lastBlob=blob; pendingBlob=blob;
   resetRec();
-  if(blob.size < 1200){ toast("録音が短すぎるか、音声が記録されていません"); return; }
+  if(blob.size < 1200){
+    showError("音声が記録されていません",
+      (bgWarned?"録音中に別のアプリ（メモなど）に切り替えたため、録音が中断されました。iPhoneのSafari/Webアプリは画面を離れると録音が止まります。":"録音が短すぎる可能性があります。")+
+      " 対策：このアプリを表示したまま話すか、iPhone純正『ボイスメモ』で録音してから『音声ファイルを読み込む』で取り込んでください。");
+    return;
+  }
   transcribe(blob);
 }
 
@@ -719,7 +737,12 @@ async function transcribe(blob){
   $("#procTitle").textContent="整形中…"; $("#procDesc").textContent="読みやすく整えています";
   let formatted=rawText;
   if(useWorker()){
-    try{ formatted = await chatAPI(buildSys("transcribe"), rawText); }catch(e){ formatted=rawText; }
+    try{
+      const f = await chatAPI(buildSys("transcribe"), rawText, false, 4000);
+      // 整形結果が原文の半分未満に縮んでいたら要約暴走とみなし原文を採用
+      if(f && f.replace(/\s/g,"").length >= rawText.replace(/\s/g,"").length*0.5){ formatted=f; }
+      else { formatted=rawText; }
+    }catch(e){ formatted=rawText; }
   }else{ await sleep(900); formatted=DEMO_FORMATTED; }
   // タイトル自動生成
   let title="";
@@ -729,6 +752,7 @@ async function transcribe(blob){
 
   current = { id:uid(), title:title.replace(/["「」]/g,"").trim(), body:formatted, orig:rawText,
     tags:[], memo:"", refined:false, xPosts:null, created:Date.now(), updated:Date.now() };
+  current._audioBlob = pendingBlob; pendingBlob=null;
   hideProc();
   openEditor(current);
   toast("文字起こしが完了しました");
@@ -766,8 +790,8 @@ async function whisperAPI(blob){
   }
   const j=await r.json(); return j.text||"";
 }
-async function chatAPI(sys,user,jsonMode){
-  const body={ model:"gpt-4o", messages:[{role:"system",content:sys},{role:"user",content:user}], temperature:0.7 };
+async function chatAPI(sys,user,jsonMode,maxTokens){
+  const body={ model:"gpt-4o", messages:[{role:"system",content:sys},{role:"user",content:user}], temperature:0.7, max_tokens: maxTokens||2000 };
   if(jsonMode) body.response_format={type:"json_object"};
   let r;
   try{
@@ -851,6 +875,19 @@ function saveCurrent(silent){
   if(!silent) toast("保存しました");
 }
 $("#saveBtn").addEventListener("click",()=>saveCurrent());
+$("#dlAudioBtn").addEventListener("click",()=>{
+  const blob = (current && current._audioBlob) || lastBlob;
+  if(!blob){ toast("保存できる録音データがありません（読み込んだ音声やデモには録音データがありません）"); return; }
+  const type=blob.type||"";
+  let ext="m4a";
+  if(type.includes("webm"))ext="webm"; else if(type.includes("wav"))ext="wav"; else if(type.includes("mpeg")||type.includes("mp3"))ext="mp3"; else if(type.includes("mp4")||type.includes("m4a"))ext="m4a";
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url; a.download="recording-"+Date.now()+"."+ext;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),4000);
+  toast("録音データを書き出しました");
+});
 
 /* ============ 推敲 ============ */
 $("#refineBtn").addEventListener("click",async()=>{
