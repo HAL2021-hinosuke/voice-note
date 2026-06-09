@@ -282,7 +282,7 @@ body{
       </div>
       <div>
         <h1>声から綴る</h1>
-        <div class="sub">VOICE → NOTE　v3</div>
+        <div class="sub">VOICE → NOTE　v4</div>
       </div>
     </div>
     <button class="icon-btn" id="settingsBtn" aria-label="設定">
@@ -331,7 +331,7 @@ body{
     <section class="view" id="view-edit">
       <div id="keyWarn" class="keynote hidden">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-        <div class="t">OpenAI APIキーが未設定です。文字起こし・推敲・X生成を使うには <a id="keyWarnLink">設定から登録</a>してください（未設定時はデモデータで動作）。</div>
+        <div class="t">中継サーバーが未設定です。文字起こし・推敲・X生成を使うには <a id="keyWarnLink">設定でサーバーURLと合言葉を登録</a>してください（未設定時はデモデータで動作）。</div>
       </div>
 
       <div class="card">
@@ -448,11 +448,16 @@ body{
         </button>
       </div>
 
-      <div class="sheet-section-title">API接続</div>
+      <div class="sheet-section-title">サーバー接続</div>
       <div class="field">
-        <label class="field-label">OpenAI APIキー</label>
-        <input type="password" id="apiKeyInput" placeholder="sk-...">
-        <div class="field-hint">キーは端末内（localStorage）にのみ保存され、外部サーバーには送信されません。文字起こしはWhisper、推敲・X生成はGPT-4oを使用します。</div>
+        <label class="field-label">中継サーバーURL（Cloudflare Workers）</label>
+        <input type="text" id="workerUrlInput" placeholder="https://xxxx.workers.dev" autocapitalize="off" autocorrect="off">
+        <div class="field-hint">Cloudflareでデプロイした受付係のURL。文字起こし・推敲・X生成はこのサーバー経由でOpenAIを呼びます。</div>
+      </div>
+      <div class="field">
+        <label class="field-label">合言葉（APP_SECRET）</label>
+        <input type="password" id="appSecretInput" placeholder="サーバーに設定した合言葉" autocapitalize="off" autocorrect="off">
+        <div class="field-hint">サーバー側に設定したものと同じ合言葉を入力します。これが一致しないと利用できません。URLが漏れても他人が使えないようにするための鍵です。</div>
       </div>
 
       <div class="sheet-section-title">自動最適</div>
@@ -560,7 +565,7 @@ function loadSettings(){
   return defaultSettings();
 }
 function defaultSettings(){
-  return { apiKey:"", auto:true, persona:DEFAULT_PERSONA, tone:"neutral", edit:"full",
+  return { apiKey:"", workerUrl:"", appSecret:"", auto:true, persona:DEFAULT_PERSONA, tone:"neutral", edit:"full",
            prompts:{...DEFAULT_PROMPTS}, noteUrl:"https://note.com/あなたのID" };
 }
 function saveSettings(){ localStorage.setItem(LS.settings, JSON.stringify(settings)); }
@@ -702,7 +707,7 @@ function restoreProc(){
 async function transcribe(blob){
   showProc("文字起こし中…","音声を解析しています");
   let rawText="";
-  if(settings.apiKey){
+  if(useWorker()){
     try{ rawText = await whisperAPI(blob); }
     catch(e){ showError("文字起こしに失敗しました", e.message); return; }
     if(!rawText || !rawText.trim()){ showError("音声を認識できませんでした", "もう少し長く、はっきり話してみてください"); return; }
@@ -713,12 +718,12 @@ async function transcribe(blob){
   // 整形
   $("#procTitle").textContent="整形中…"; $("#procDesc").textContent="読みやすく整えています";
   let formatted=rawText;
-  if(settings.apiKey){
+  if(useWorker()){
     try{ formatted = await chatAPI(buildSys("transcribe"), rawText); }catch(e){ formatted=rawText; }
   }else{ await sleep(900); formatted=DEMO_FORMATTED; }
   // タイトル自動生成
   let title="";
-  if(settings.apiKey){
+  if(useWorker()){
     try{ title = await chatAPI("次の文章に日本語で30字以内の魅力的なタイトルを付け、タイトルだけ返してください。", formatted); }catch(e){ title=formatted.slice(0,18); }
   }else{ await sleep(500); title=DEMO_TITLE; }
 
@@ -730,6 +735,9 @@ async function transcribe(blob){
 }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
+function workerBase(){ return (settings.workerUrl||"").replace(/\/+$/,""); }
+function useWorker(){ return !!(settings.workerUrl && settings.appSecret); }
+
 async function whisperAPI(blob){
   const fd=new FormData();
   const type=(blob.type||"").toLowerCase();
@@ -739,32 +747,39 @@ async function whisperAPI(blob){
   else if(type.includes("mpeg")||type.includes("mp3")) ext="mp3";
   else if(type.includes("ogg")) ext="ogg";
   else if(type.includes("webm")) ext="webm";
-  // MIMEが空（ファイル読込時など）はファイル名から推測
   if(!type && blob.name){ const m=blob.name.split(".").pop().toLowerCase(); if(m) ext=m; }
   fd.append("file", blob, "audio."+ext);
-  fd.append("model","whisper-1");
   fd.append("language","ja");
+
   let r;
   try{
-    r=await fetch("https://api.openai.com/v1/audio/transcriptions",{
-      method:"POST", headers:{Authorization:"Bearer "+settings.apiKey}, body:fd });
+    r=await fetch(workerBase()+"/transcribe",{
+      method:"POST", headers:{"x-app-secret":settings.appSecret}, body:fd });
   }catch(netErr){ throw new Error("通信失敗: "+(netErr&&netErr.message?netErr.message:String(netErr))); }
   if(!r.ok){
     let detail="";
-    try{ const j=await r.json(); detail=j.error&&j.error.message?j.error.message:JSON.stringify(j); }
+    try{ const j=await r.json(); detail=j.error&&j.error.message?j.error.message:(j.error||JSON.stringify(j)); }
     catch(_){ try{ detail=await r.text(); }catch(__){} }
-    if(r.status===401) throw new Error("APIキーが無効です");
+    if(r.status===401) throw new Error("認証失敗：合言葉を確認してください");
     if(r.status===429) throw new Error("利用上限/残高不足の可能性（429）");
-    throw new Error("HTTP "+r.status+(detail?"："+detail.slice(0,140):""));
+    throw new Error("HTTP "+r.status+(detail?"："+String(detail).slice(0,140):""));
   }
   const j=await r.json(); return j.text||"";
 }
 async function chatAPI(sys,user,jsonMode){
   const body={ model:"gpt-4o", messages:[{role:"system",content:sys},{role:"user",content:user}], temperature:0.7 };
   if(jsonMode) body.response_format={type:"json_object"};
-  const r=await fetch("https://api.openai.com/v1/chat/completions",{
-    method:"POST", headers:{"Content-Type":"application/json",Authorization:"Bearer "+settings.apiKey}, body:JSON.stringify(body) });
-  if(!r.ok){ throw new Error(r.status===401?"APIキーが無効です":("HTTP "+r.status)); }
+  let r;
+  try{
+    r=await fetch(workerBase()+"/chat",{
+      method:"POST", headers:{"Content-Type":"application/json","x-app-secret":settings.appSecret}, body:JSON.stringify(body) });
+  }catch(netErr){ throw new Error("通信失敗: "+(netErr&&netErr.message?netErr.message:String(netErr))); }
+  if(!r.ok){
+    let detail="";
+    try{ const j=await r.json(); detail=j.error&&j.error.message?j.error.message:(j.error||""); }catch(_){}
+    if(r.status===401) throw new Error("認証失敗：合言葉を確認してください");
+    throw new Error("HTTP "+r.status+(detail?"："+String(detail).slice(0,120):""));
+  }
   const j=await r.json(); return j.choices[0].message.content.trim();
 }
 function buildSys(kind){
@@ -778,7 +793,7 @@ function buildSys(kind){
 /* ============ エディタ ============ */
 function openEditor(d){
   current=d; textMode="edit";
-  $("#keyWarn").classList.toggle("hidden", !!settings.apiKey);
+  $("#keyWarn").classList.toggle("hidden", useWorker());
   $("#titleInput").value=d.title;
   $("#bodyInput").value=d.body;
   $("#origText").textContent=d.orig||"（原文なし）";
@@ -844,7 +859,7 @@ $("#refineBtn").addEventListener("click",async()=>{
   const btn=$("#refineBtn"); btn.disabled=true; const orig=btn.innerHTML; btn.innerHTML='<div class="ring" style="width:18px;height:18px;border-width:2px;margin:0"></div> 推敲中…';
   try{
     let result;
-    if(settings.apiKey){
+    if(useWorker()){
       const raw=await chatAPI(buildSys("refine"), current.body, true);
       result=JSON.parse(stripJson(raw));
     }else{ await sleep(1600); result=DEMO_REFINED; }
@@ -871,7 +886,7 @@ $("#genXBtn").addEventListener("click",async()=>{
   try{
     let posts;
     const input="タイトル:"+current.title+"\n\n本文:\n"+current.body;
-    if(settings.apiKey){
+    if(useWorker()){
       const raw=await chatAPI(buildSys("x"), input, false);
       posts=JSON.parse(stripJson(raw));
     }else{ await sleep(1500); posts=DEMO_X; }
@@ -952,7 +967,8 @@ $("#searchInput").addEventListener("input",renderHistory);
 
 /* ============ 設定シート ============ */
 function openSettings(){
-  $("#apiKeyInput").value=settings.apiKey;
+  $("#workerUrlInput").value=settings.workerUrl||"";
+  $("#appSecretInput").value=settings.appSecret||"";
   $("#personaInput").value=settings.persona;
   $("#autoSwitch").classList.toggle("on",settings.auto);
   $("#promptTranscribe").value=settings.prompts.transcribe;
@@ -972,7 +988,8 @@ $$("#editOpts .opt").forEach(o=>o.addEventListener("click",()=>{ $$("#editOpts .
 $("#resetPrompts").addEventListener("click",()=>{ $("#promptTranscribe").value=DEFAULT_PROMPTS.transcribe; $("#promptRefine").value=DEFAULT_PROMPTS.refine; $("#promptX").value=DEFAULT_PROMPTS.x; toast("プロンプトを初期値に戻しました"); });
 $("#keyWarnLink").addEventListener("click",openSettings);
 $("#saveSettings").addEventListener("click",()=>{
-  settings.apiKey=$("#apiKeyInput").value.trim();
+  settings.workerUrl=$("#workerUrlInput").value.trim();
+  settings.appSecret=$("#appSecretInput").value.trim();
   settings.persona=$("#personaInput").value;
   settings.auto=$("#autoSwitch").classList.contains("on");
   settings.tone=$("#toneOpts .opt.active").dataset.v;
@@ -981,7 +998,7 @@ $("#saveSettings").addEventListener("click",()=>{
   settings.prompts.refine=$("#promptRefine").value;
   settings.prompts.x=$("#promptX").value;
   saveSettings(); closeSettings(); toast("設定を保存しました");
-  if(current) $("#keyWarn").classList.toggle("hidden", !!settings.apiKey);
+  if(current) $("#keyWarn").classList.toggle("hidden", useWorker());
 });
 
 /* ============ デモデータ（APIキー未設定時） ============ */
