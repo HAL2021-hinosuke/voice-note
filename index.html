@@ -282,7 +282,7 @@ body{
       </div>
       <div>
         <h1>声から綴る</h1>
-        <div class="sub">VOICE → NOTE　v4</div>
+        <div class="sub">VOICE → NOTE　v5</div>
       </div>
     </div>
     <button class="icon-btn" id="settingsBtn" aria-label="設定">
@@ -760,7 +760,7 @@ async function whisperAPI(blob){
     let detail="";
     try{ const j=await r.json(); detail=j.error&&j.error.message?j.error.message:(j.error||JSON.stringify(j)); }
     catch(_){ try{ detail=await r.text(); }catch(__){} }
-    if(r.status===401) throw new Error("認証失敗：合言葉を確認してください");
+    if(r.status===401) throw new Error(detail||"認証失敗：合言葉を確認してください");
     if(r.status===429) throw new Error("利用上限/残高不足の可能性（429）");
     throw new Error("HTTP "+r.status+(detail?"："+String(detail).slice(0,140):""));
   }
